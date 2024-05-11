@@ -29,3 +29,11 @@ example/_*
 
 ## xcode specific
 *xcuserdata*
+
+CMakeLists.txt.*
+
+cmake-build-*
+
+build
+
+.idea

@@ -3,6 +3,129 @@
 Nano SVG
 ==========
 
+## Embedded
+Added a usage example of rendering using file streams and piecewise rasterization for embedded rendering with limited memory.
+With limited memory of 3MB RAM, it can parse and render SVG files of any size, such as 10 MB or more.
+
+The following example uses OpenCV to display a rasterized image
+```cpp
+#include <print>
+#include <vector>
+#include <opencv2/opencv.hpp>
+#include <opencv2/core/utils/logger.hpp>
+
+#include "nanosparser.h"
+
+using namespace std;
+using namespace cv::utils::logging;
+
+template<typename T>
+struct bbox_t {
+    T x, y, width, height;
+};
+
+using f_bbox_t = bbox_t<float>;
+
+typedef struct {
+    float width;
+    float height;
+} preview_t;
+
+cv::Mat loadFromFile(const std::string &filename, preview_t preview) {
+    SVGParser parser;
+    parser.open(filename.c_str(), "px", 96);
+    parser.parser(); // [1]
+
+    if(!parser.isValid()) {
+        parser.close();
+        return {};
+    }
+
+    parser.repaser(); // [2]
+
+    auto size = parser.size();
+
+    auto bbox = parser.bounds();
+
+    uint8_t *buffer            = NULL;
+    int clip_width  = 0;
+    int clip_height = 0;
+
+    // Calculate scaling & rendering & crop true content size
+    auto source = preview_t {.width = size.width, .height = size.height};
+    float scale  = SVGParser::CalcRasterizerScale(source.width, source.height, preview.width, preview.height);
+
+    int width  = (int)(size.width * scale);
+    int height = (int)(size.height * scale);
+
+    cv::Mat mat = cv::Mat::zeros(cv::Size(width, height), CV_8UC4);
+
+    float tx {0}, ty {0};
+    if(bbox.x > 0) {
+        tx = -bbox.x * scale;
+    }
+    if(bbox.y > 0) {
+        ty = -bbox.y * scale;
+    }
+
+    parser.render(tx, ty, scale, mat.data, width, height); // [3]
+
+    clip_width  = bbox.width * scale;
+    clip_height = bbox.height * scale;
+
+    if(clip_width > width) {
+        clip_width = width;
+    }
+
+    if(clip_height > height) {
+        clip_height = height;
+    }
+
+    // TODO clip
+
+    parser.close();
+
+    return mat.clone();
+}
+
+int main() {
+    setLogLevel(LogLevel::LOG_LEVEL_WARNING);
+
+    // auto svg = R"(example\zoom-out.svg)";
+    auto svg = R"(example\tig.svg)";
+
+    cv::TickMeter cost;
+    cost.start();
+    auto mat = loadFromFile(svg, {480, 320});
+  
+    cost.stop();
+    std::println("cost:{}",cost.getTimeMilli());
+
+    if(!mat.empty()) {
+        std::vector<cv::Mat> a;
+        cv::split(mat, a);
+
+        cv::Mat binary = ~a[3];
+        if(!cv::hasNonZero(binary)) {
+            binary = a[2];
+        } 
+       
+        cv::namedWindow("windows");
+        cv::imshow("windows", binary);
+    } else {
+        mat = cv::Mat::zeros({480, 320}, CV_8UC3);
+        cv::namedWindow("windows");
+        cv::imshow("windows", mat);
+    }
+
+    while(true) {
+        if(cv::waitKey(10) == 'q') break;
+    }
+
+    return 0;
+}
+```
+
 ## Parser
 
 ![screenshot of some splines rendered with the sample program](/example/screenshot-1.png?raw=true)

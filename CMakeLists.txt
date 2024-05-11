@@ -1,75 +1,29 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.27.7)
 
-project(NanoSVG C)
+project(
+  NanoSVG
+  VERSION 1.0.0
+  DESCRIPTION "Embedded NanoSVG"
+  HOMEPAGE_URL "https://github.com/cheungxiongwei/nanosvg"
+  LANGUAGES C CXX)
 
-# CMake needs *.c files to do something useful
-configure_file(src/nanosvg.h ${CMAKE_CURRENT_BINARY_DIR}/nanosvg.c)
-configure_file(src/nanosvgrast.h ${CMAKE_CURRENT_BINARY_DIR}/nanosvgrast.c)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
-add_library(nanosvg ${CMAKE_CURRENT_BINARY_DIR}/nanosvg.c)
+# cmake-format: off
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-int-conversion")
 
-find_library(MATH_LIBRARY m) # Business as usual
-if(MATH_LIBRARY)
-    target_link_libraries(nanosvg PUBLIC ${MATH_LIBRARY})
-endif()
-
+add_library(nanosvg src/nanosvg.c)
 target_include_directories(nanosvg PUBLIC $<INSTALL_INTERFACE:include/nanosvg>)
-target_compile_definitions(nanosvg PRIVATE NANOSVG_IMPLEMENTATION)
 
-# Same for nanosvgrast
-add_library(nanosvgrast ${CMAKE_CURRENT_BINARY_DIR}/nanosvgrast.c)
+add_library(nanosvgrast src/nanosvgrast.c)
 target_link_libraries(nanosvgrast PUBLIC nanosvg)
 target_include_directories(nanosvgrast PRIVATE src)
-target_compile_definitions(nanosvgrast PRIVATE NANOSVGRAST_IMPLEMENTATION)
+target_include_directories(nanosvgrast INTERFACE src)
 
-# Installation and export:
+# cmake-format: on
 
-include(CMakePackageConfigHelpers)
+add_executable(nanoembedded embedded/main.cpp embedded/nanosparser.cpp
+                            embedded/nanosparser.hpp)
 
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake"
-    VERSION 1.0
-    COMPATIBILITY AnyNewerVersion
-)
-
-install(TARGETS nanosvg nanosvgrast
-        EXPORT ${PROJECT_NAME}Targets
-)
-
-export(EXPORT ${PROJECT_NAME}Targets 
-       FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Targets.cmake" 
-       NAMESPACE ${PROJECT_NAME}::
-)
-
-set(ConfigPackageLocation lib/cmake/${PROJECT_NAME})
-
-configure_package_config_file(${CMAKE_CURRENT_SOURCE_DIR}/Config.cmake.in
-  "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake"
-  INSTALL_DESTINATION ${ConfigPackageLocation}
-  NO_CHECK_REQUIRED_COMPONENTS_MACRO
-)
-
-install(
-    FILES
-      src/nanosvg.h
-      src/nanosvgrast.h
-    DESTINATION
-      include/nanosvg
-  )
-
-install(EXPORT ${PROJECT_NAME}Targets
-  FILE
-    ${PROJECT_NAME}Targets.cmake
-  NAMESPACE
-    ${PROJECT_NAME}::
-  DESTINATION
-    ${ConfigPackageLocation}
-)
-
-install(
-  FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake"
-  DESTINATION
-    ${ConfigPackageLocation}
-)
+target_link_libraries(nanoembedded PRIVATE nanosvgrast)
