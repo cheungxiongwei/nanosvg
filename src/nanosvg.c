@@ -281,13 +281,13 @@ int patch__nsvg__parseXML(char* input, void (*startelCb)(void* ud, const char* e
     while((ch = fgetc(f)) != EOF) {
         if(ch == '<' && state == NSVG_XML_CONTENT) {
             // Start of a tag
+            memset(input, 0, NSVG_MAX_BUFFER);
             mark  = &input[idx + 1];
             state = NSVG_XML_TAG;
         } else if(ch == '>' && state == NSVG_XML_TAG) {
             // Start of a content or new tag.
             nsvg__parseElement(mark, startelCb, endelCb, ud);
             state = NSVG_XML_CONTENT;
-            input[idx+1] = 0;
             idx   = 0;
         } else {
             input[++idx] = ch;
