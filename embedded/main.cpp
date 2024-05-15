@@ -5,6 +5,8 @@
 
 #include <stdio.h>
 
+#include "bezier.h"
+
 int main() {
   constexpr auto svg = R"(C:\Users\cheungxiongwei\Pictures\tig.svg)";
 
@@ -20,14 +22,18 @@ int main() {
     bounds[1] = std::min(bounds[1], shape->bounds[1]);
     bounds[2] = std::max(bounds[2], shape->bounds[2]);
     bounds[3] = std::max(bounds[3], shape->bounds[3]);
-#if 0
-        for (NSVGpath *path = shape->paths; path != NULL; path = path->next) {
-            for (int i = 0; i < path->npts-1; i += 3) {
-                float* p = &path->pts[i*2];
-                //drawCubicBez(p[0],p[1], p[2],p[3], p[4],p[5], p[6],p[7]);
-            }
+
+    for (NSVGpath *path = shape->paths; path != NULL; path = path->next) {
+      for (int i = 0; i < path->npts - 1; i += 3) {
+        float *p = &path->pts[i * 2];
+        PolygonF polygon = Bezier::fromPoints({p[0], p[1]}, {p[2], p[3]},
+                                              {p[4], p[5]}, {p[6], p[7]})
+                               .toPolygon();
+        for (auto &line : polygon) {
+          // Draw Line
         }
-#endif
+      }
+    } // end for
   }
   // Delete
   nsvgDelete(image);
