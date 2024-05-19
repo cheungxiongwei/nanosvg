@@ -8,7 +8,8 @@
 #include "bezier.h"
 
 int main() {
-  constexpr auto svg = R"(C:\Users\cheungxiongwei\Pictures\tig.svg)";
+  constexpr auto svg = R"(C:\Users\cheungxiongwei\Documents\test(1).svg)";
+  //constexpr auto svg = R"(C:\Users\cheungxiongwei\Pictures\tig.svg)";
 
   // Load SVG
   NSVGimage *image;
@@ -26,11 +27,11 @@ int main() {
     for (NSVGpath *path = shape->paths; path != NULL; path = path->next) {
       for (int i = 0; i < path->npts - 1; i += 3) {
         float *p = &path->pts[i * 2];
-        PolygonF polygon = Bezier::fromPoints({p[0], p[1]}, {p[2], p[3]},
-                                              {p[4], p[5]}, {p[6], p[7]})
-                               .toPolygon();
-        for (auto &line : polygon) {
-          // Draw Line
+        CubicBezierCurve curve = Bezier::fromPoints({p[0], p[1]}, {p[2], p[3]},{p[4], p[5]}, {p[6], p[7]});
+        PolygonF polygon = Bezier::toPolygon(curve);
+        for(auto i = 1;i < polygon.size();i++){
+            // Draw Line 
+            // polygon[i-1],polygon[i]
         }
       }
     } // end for
@@ -52,7 +53,7 @@ int main() {
     parser.close();
     cost.stop();
     std::println("cost:{}", cost.elapsedMilliseconds());
-    return 0;
+    return getchar();
   }
 
   return 0;

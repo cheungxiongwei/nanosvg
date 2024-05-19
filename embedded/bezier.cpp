@@ -1,84 +1,147 @@
 #include "bezier.h"
 
-// Calculate distance between two points
-static float distance(const PointF &p1, const PointF &p2) {
-  float dx = p2.x - p1.x;
-  float dy = p2.y - p1.y;
-  return sqrt(dx * dx + dy * dy);
-}
+// De Casteljau's algorithm for cubic Bezier subdivision
+static void FlattenCubicBezierRecursive(const CubicBezierCurve &curve,
+                                        float bezier_flattening_threshold,
+                                        std::vector<PointF> &result) {
+  CubicBezierCurve beziers[10];
+  int levels[10];
+  beziers[0] = curve;
+  levels[0] = 9;
+  int top = 0;
 
-// Subdivide a cubic Bezier curve into two halves
-static void subdivideCubicBezier(const CubicBezierCurve &curve,
-                                 CubicBezierCurve &left,
-                                 CubicBezierCurve &right) {
-  PointF mid1, mid2, mid3, mid4, mid5, mid6;
-  mid1.x = (curve.start.x + curve.control1.x) / 2;
-  mid1.y = (curve.start.y + curve.control1.y) / 2;
-  mid2.x = (curve.control1.x + curve.control2.x) / 2;
-  mid2.y = (curve.control1.y + curve.control2.y) / 2;
-  mid3.x = (curve.control2.x + curve.end.x) / 2;
-  mid3.y = (curve.control2.y + curve.end.y) / 2;
+  while (top >= 0) {
+    CubicBezierCurve *b = &beziers[top];
 
-  mid4.x = (mid1.x + mid2.x) / 2;
-  mid4.y = (mid1.y + mid2.y) / 2;
+    float y4y1 = b->end.y - b->start.y;
+    float x4x1 = b->end.x - b->start.x;
+    float l = std::abs(x4x1) + std::abs(y4y1);
+    float d;
+    if (l > 1.) {
+      d = std::abs((x4x1) * (b->start.y - b->control1.y) -
+                   (y4y1) * (b->start.x - b->control1.x)) +
+          std::abs((x4x1) * (b->start.y - b->control2.y) -
+                   (y4y1) * (b->start.x - b->control2.x));
+    } else {
+      d = std::abs(b->start.x - b->control1.x) +
+          std::abs(b->start.y - b->control1.y) +
+          std::abs(b->start.x - b->control2.x) +
+          std::abs(b->start.y - b->control2.y);
+      l = 1.;
+    }
+    if (d < bezier_flattening_threshold * l || levels[top] == 0) {
+      result.emplace_back(b->end);
+      --top;
+    } else {
 
-  mid5.x = (mid2.x + mid3.x) / 2;
-  mid5.y = (mid2.y + mid3.y) / 2;
+      auto fn_split = [](const CubicBezierCurve *curve)
+          -> std::pair<CubicBezierCurve, CubicBezierCurve> {
+        const auto mid = [](PointF lhs, PointF rhs) -> PointF {
+          return PointF{((lhs.x + rhs.x) * 0.5f), ((lhs.y + rhs.y) * 0.5f)};
+        };
 
-  mid6.x = (mid4.x + mid5.x) / 2;
-  mid6.y = (mid4.y + mid5.y) / 2;
+        const PointF mid_12 = mid(curve->start, curve->control1);
+        const PointF mid_23 = mid(curve->control1, curve->control2);
+        const PointF mid_34 = mid(curve->control2, curve->end);
+        const PointF mid_12_23 = mid(mid_12, mid_23);
+        const PointF mid_23_34 = mid(mid_23, mid_34);
+        const PointF mid_12_23__23_34 = mid(mid_12_23, mid_23_34);
 
-  left.start = curve.start;
-  left.control1 = mid1;
-  left.control2 = mid4;
-  left.end = mid6;
+        return {
+            Bezier::fromPoints(curve->start, mid_12, mid_12_23,
+                               mid_12_23__23_34),
+            Bezier::fromPoints(mid_12_23__23_34, mid_23_34, mid_34, curve->end),
+        };
+      };
 
-  right.start = mid6;
-  right.control1 = mid5;
-  right.control2 = mid3;
-  right.end = curve.end;
-}
-
-static void flattenCubicBezierRecursive(const CubicBezierCurve &curve,
-                                 float tolerance,
-                                 std::vector<PointF> &result) {
-  // Calculate the length of the curve
-  float length = distance(curve.start, curve.end);
-
-  // Calculate the distance between the control points and the midpoint
-  float control1_mid = distance(curve.start, curve.control1) +
-                        distance(curve.control1, curve.end);
-  float control2_mid = distance(curve.start, curve.control2) +
-                        distance(curve.control2, curve.end);
-
-  // Check if the curve needs further subdivision
-  if (control1_mid + control2_mid - length > tolerance) {
-    // Subdivide the curve
-    CubicBezierCurve left, right;
-    subdivideCubicBezier(curve, left, right);
-    // Recursively flatten each half
-    flattenCubicBezierRecursive(left, tolerance, result);
-    flattenCubicBezierRecursive(right, tolerance, result);
-  } else {
-    // If the curve doesn't need further subdivision, add the endpoint to the
-    // result
-    result.push_back(curve.end);
+      std::tie(b[1], b[0]) = fn_split(b);
+      levels[top + 1] = --levels[top];
+      ++top;
+    }
   }
 }
 
-// Flatten a cubic Bezier curve into line segments
-static std::vector<PointF> flattenCubicBezier(const CubicBezierCurve &curve,
-                                              float tolerance) {
-  std::vector<PointF> flattenedCurve;
-  flattenCubicBezierRecursive(curve, tolerance, flattenedCurve);
+// De Casteljau's algorithm for cubic Bezier subdivision
+static void
+EmbeddedFlattenCubicBezierRecursive(const CubicBezierCurve &curve,
+                                    float bezier_flattening_threshold,
+                                    EmbeddedPolygonF *result) {
+  CubicBezierCurve beziers[10];
+  int levels[10];
+  beziers[0] = curve;
+  levels[0] = 9;
+  int top = 0;
+
+  while (top >= 0) {
+    CubicBezierCurve *b = &beziers[top];
+
+    float y4y1 = b->end.y - b->start.y;
+    float x4x1 = b->end.x - b->start.x;
+    float l = std::abs(x4x1) + std::abs(y4y1);
+    float d;
+    if (l > 1.) {
+      d = std::abs((x4x1) * (b->start.y - b->control1.y) -
+                   (y4y1) * (b->start.x - b->control1.x)) +
+          std::abs((x4x1) * (b->start.y - b->control2.y) -
+                   (y4y1) * (b->start.x - b->control2.x));
+    } else {
+      d = std::abs(b->start.x - b->control1.x) +
+          std::abs(b->start.y - b->control1.y) +
+          std::abs(b->start.x - b->control2.x) +
+          std::abs(b->start.y - b->control2.y);
+      l = 1.;
+    }
+    if (d < bezier_flattening_threshold * l || levels[top] == 0) {
+      if (result->count > 63)
+        result->count = 63;
+
+      result->data[result->count++] = PointF(b->end.x, b->end.y);
+      --top;
+    } else {
+
+      auto fn_split = [](const CubicBezierCurve *curve)
+          -> std::pair<CubicBezierCurve, CubicBezierCurve> {
+        const auto mid = [](PointF lhs, PointF rhs) -> PointF {
+          return PointF{((lhs.x + rhs.x) * 0.5f), ((lhs.y + rhs.y) * 0.5f)};
+        };
+
+        const PointF mid_12 = mid(curve->start, curve->control1);
+        const PointF mid_23 = mid(curve->control1, curve->control2);
+        const PointF mid_34 = mid(curve->control2, curve->end);
+        const PointF mid_12_23 = mid(mid_12, mid_23);
+        const PointF mid_23_34 = mid(mid_23, mid_34);
+        const PointF mid_12_23__23_34 = mid(mid_12_23, mid_23_34);
+
+        return {
+            Bezier::fromPoints(curve->start, mid_12, mid_12_23,
+                               mid_12_23__23_34),
+            Bezier::fromPoints(mid_12_23__23_34, mid_23_34, mid_34, curve->end),
+        };
+      };
+
+      std::tie(b[1], b[0]) = fn_split(b);
+      levels[top + 1] = --levels[top];
+      ++top;
+    }
+  }
+}
+
+PolygonF Bezier::toPolygon(const CubicBezierCurve &curve,
+                           float bezier_flattening_threshold) {
+  PolygonF flattenedCurve;
+  flattenedCurve.emplace_back(curve.start);
+  FlattenCubicBezierRecursive(curve, bezier_flattening_threshold,
+                              flattenedCurve);
   return flattenedCurve;
 }
 
-PolygonF Bezier::toPolygon(float bezier_flattening_threshold) {
-  PolygonF polygon;
-  auto points = flattenCubicBezier(mCurve, bezier_flattening_threshold);
-  for (size_t i = 1; i < points.size(); i++) {
-    polygon.emplace_back(LineF{points[i - 1], points[i]});
+void cpp::flattenCubicBezier(const CubicBezierCurve &curve,
+                             EmbeddedPolygonF *polygon,
+                             float bezier_flattening_threshold) {
+  if (polygon) {
+    polygon->count = 0;
+    polygon->data[polygon->count++] = curve.start;
+    EmbeddedFlattenCubicBezierRecursive(curve, bezier_flattening_threshold,
+                                        polygon);
   }
-  return polygon;
 }

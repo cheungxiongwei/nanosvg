@@ -1,6 +1,6 @@
 
-#ifndef BEZIER_P_H
-#define BEZIER_P_H
+#ifndef BEZIER_H
+#define BEZIER_H
 
 #include <vector>
 
@@ -8,11 +8,7 @@ struct PointF {
   float x, y;
 };
 
-struct LineF {
-  PointF start, end;
-};
-
-using PolygonF = std::vector<LineF>;
+using PolygonF = std::vector<PointF>;
 
 struct CubicBezierCurve {
   PointF start;
@@ -21,17 +17,25 @@ struct CubicBezierCurve {
   PointF end;
 };
 
-// ref https://en.wikipedia.org/wiki/De_Casteljau%27s_algorithm
 class Bezier {
 public:
-  static Bezier fromPoints(const PointF &p1, const PointF &p2, const PointF &p3,
-                           const PointF &p4) {
-    return {p1,p2,p3,p4};
+  static CubicBezierCurve fromPoints(const PointF &p1, const PointF &p2,
+                                     const PointF &p3, const PointF &p4) {
+    return {p1, p2, p3, p4};
   }
 
-  PolygonF toPolygon(float bezier_flattening_threshold = 0.5);
-
-  CubicBezierCurve mCurve;
+  static PolygonF toPolygon(const CubicBezierCurve &curve,
+                            float bezier_flattening_threshold = 0.5);
 };
 
-#endif // BEZIER_P_H
+// embedded 
+struct EmbeddedPolygonF {
+  PointF data[64];
+  uint16_t count;
+};
+
+void flattenCubicBezier(const CubicBezierCurve &curve,
+                        EmbeddedPolygonF *polygon,
+                        float bezier_flattening_threshold = 0.5);
+
+#endif // BEZIER_H
