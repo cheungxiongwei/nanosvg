@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <float.h>
 #include <math.h>
 
 #define NSVG_PI      (3.14159265358979323846264338327f)
@@ -125,7 +126,10 @@ typedef struct NSVGparser {
     NSVGimage* image;
     NSVGgradientData* gradients;
     NSVGshape* shapesTail;
+
     NSVGcontext* context;
+    NSVGtransform *transform;
+
     float viewMinx, viewMiny, viewWidth, viewHeight;
     int alignX, alignY, alignType;
     float dpi;
@@ -270,11 +274,16 @@ int nsvg__parseXML(char* input, void (*startelCb)(void* ud, const char* el, cons
     return 1;
 }
 
-int patch__nsvg__parseXML(char* input, void (*startelCb)(void* ud, const char* el, const char** attr), void (*endelCb)(void* ud, const char* el), void (*contentCb)(void* ud, const char* s), void* ud) {
-    NSVGcontext* context = ((struct NSVGparser*)ud)->context;
-    FILE* f              = (FILE*)context->fs;
+int patch__transform_nsvg__parseXML(NSVGstream *stream, void (*startelCb)(void* ud, const char* el, const char** attr), void (*endelCb)(void* ud, const char* el), void (*contentCb)(void* ud, const char* s), void* ud) {
+  NSVGtransform *transform = ((struct NSVGparser *)ud)->transform;
+
+    FILE* f              = (FILE*)stream->fs;
+    char* input          = stream->buffer;
     char* mark           = input;
     int state            = NSVG_XML_CONTENT;
+
+    float total = stream->size * 2.f;
+    int index = 0;
 
     int idx = 0;
     int ch;
@@ -291,6 +300,79 @@ int patch__nsvg__parseXML(char* input, void (*startelCb)(void* ud, const char* e
             idx   = 0;
         } else {
             input[++idx] = ch;
+        }
+
+        index++;
+
+        if(stream->cb_interrupt){
+            stream->interrupt = stream->cb_interrupt();
+            if(stream->interrupt){
+                return 0;
+            }
+        }
+
+        if (transform && transform->readiness) {
+            stream->progress = 0.5;
+            if(stream->cb_progress){
+                stream->cb_progress(stream->progress);
+            }
+            return 0;
+        }else{
+            stream->progress =  index / total;
+            if(stream->progress > 0.5){
+                stream->progress = 0.5;
+            }
+            if(stream->cb_progress){
+                stream->cb_progress(stream->progress);
+            }
+        }
+    }
+
+    return 1;
+}
+
+int patch__context_nsvg__parseXML(NSVGstream *stream, void (*startelCb)(void* ud, const char* el, const char** attr), void (*endelCb)(void* ud, const char* el), void (*contentCb)(void* ud, const char* s), void* ud) {
+    FILE* f              = (FILE*)stream->fs;
+    char* input          = stream->buffer;
+    char* mark           = input;
+    int state            = NSVG_XML_CONTENT;
+
+    float total = stream->size * 2.f;
+    int index = 0;
+
+    int idx = 0;
+    int ch;
+    while((ch = fgetc(f)) != EOF) {
+        if(ch == '<' && state == NSVG_XML_CONTENT) {
+            // Start of a tag
+            memset(input, 0, NSVG_MAX_BUFFER);
+            mark  = &input[idx + 1];
+            state = NSVG_XML_TAG;
+        } else if(ch == '>' && state == NSVG_XML_TAG) {
+            // Start of a content or new tag.
+            nsvg__parseElement(mark, startelCb, endelCb, ud);
+            state = NSVG_XML_CONTENT;
+            idx   = 0;
+        } else {
+            input[++idx] = ch;
+        }
+
+        index++;
+
+        if(stream->cb_interrupt){
+            stream->interrupt = stream->cb_interrupt();
+            if(stream->interrupt){
+                return 0;
+            }
+        }
+
+        // [0.5,1.0]
+        stream->progress = index / total + 0.5f;
+        if(stream->progress > 1.0){
+            stream->progress = 1.0;
+        }
+        if(stream->cb_progress){
+            stream->cb_progress(stream->progress);
         }
     }
 
@@ -622,6 +704,36 @@ static float nsvg__convertToPixels(NSVGparser* p, NSVGcoordinate c, float orig, 
     return c.value;
 }
 
+static float patch__transform__nsvg__convertToPixels(NSVGparser *p, NSVGcoordinate c,
+                                          float orig,
+                                          float length) {
+    switch (c.units) {
+    case NSVG_UNITS_USER:
+        return c.value;
+    case NSVG_UNITS_PX:
+        return c.value;
+    case NSVG_UNITS_PT:
+        return c.value / 72.0f * p->dpi;
+    case NSVG_UNITS_PC:
+        return c.value / 6.0f * p->dpi;
+    case NSVG_UNITS_MM:
+        return c.value / 25.4f * p->dpi;
+    case NSVG_UNITS_CM:
+        return c.value / 2.54f * p->dpi;
+    case NSVG_UNITS_IN:
+        return c.value * p->dpi;
+    case NSVG_UNITS_EM:
+        return c.value * 16.f;
+    case NSVG_UNITS_EX:
+        return c.value * 16.f * 0.52f; // x-height of Helvetica.
+    case NSVG_UNITS_PERCENT:
+        return orig + c.value / 100.0f * length;
+    default:
+        return c.value;
+    }
+    return c.value;
+}
+
 static NSVGgradientData* nsvg__findGradientData(NSVGparser* p, const char* id) {
     NSVGgradientData* grad = p->gradients;
     if(id == NULL || *id == '\0') return NULL;
@@ -835,7 +947,29 @@ static void nsvg__addShape(NSVGparser* p) {
         p->shapesTail->next = shape;
     p->shapesTail = shape;
 
-    if(p->context && p->context->cb_shape) {
+    if(p->transform){
+        p->transform->shapeCount++;
+
+        float *bounds = p->transform->bounds;
+        bounds[0] = nsvg__minf(bounds[0], shape->bounds[0]);
+        bounds[1] = nsvg__minf(bounds[1], shape->bounds[1]);
+        bounds[2] = nsvg__maxf(bounds[2], shape->bounds[2]);
+        bounds[3] = nsvg__maxf(bounds[3], shape->bounds[3]);
+
+        if(shape) {
+            nsvg__deletePaths(shape->paths);
+            nsvg__deletePaint(&shape->fill);
+            nsvg__deletePaint(&shape->stroke);
+            free(shape);
+            shape = NULL;
+
+            p->npts          = 0;
+            p->plist         = NULL;
+            p->image->shapes = NULL;
+            p->shapesTail    = NULL;
+        }
+    }
+    else if(p->context && p->context->cb_shape) {
         p->context->cb_shape(shape, p->context);
         if(shape) {
             nsvg__deletePaths(shape->paths);
@@ -844,7 +978,7 @@ static void nsvg__addShape(NSVGparser* p) {
             free(shape);
             shape = NULL;
 
-            p->npts          = NULL;
+            p->npts          = 0;
             p->plist         = NULL;
             p->image->shapes = NULL;
             p->shapesTail    = NULL;
@@ -2579,6 +2713,136 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr) {
     }
 }
 
+static void patch__transform__readiness__scaleToViewbox(NSVGparser* p);
+
+static void patch__transform__nsvg__startElement(void* ud, const char* el, const char** attr) {
+    NSVGparser* p = (NSVGparser*)ud;
+
+    if(p->defsFlag) {
+        // Skip everything but gradients in defs
+        if(strcmp(el, "linearGradient") == 0) {
+            nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
+        } else if(strcmp(el, "radialGradient") == 0) {
+            nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
+        } else if(strcmp(el, "stop") == 0) {
+            nsvg__parseGradientStop(p, attr);
+        }
+        return;
+    }
+
+    if(strcmp(el, "g") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseAttribs(p, attr);
+    } else if(strcmp(el, "path") == 0) {
+        if(p->pathFlag)  // Do not allow nested paths.
+            return;
+        nsvg__pushAttr(p);
+        nsvg__parsePath(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "rect") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseRect(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "circle") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseCircle(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "ellipse") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseEllipse(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "line") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseLine(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "polyline") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parsePoly(p, attr, 0);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "polygon") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parsePoly(p, attr, 1);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "linearGradient") == 0) {
+        nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
+    } else if(strcmp(el, "radialGradient") == 0) {
+        nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
+    } else if(strcmp(el, "stop") == 0) {
+        nsvg__parseGradientStop(p, attr);
+    } else if(strcmp(el, "defs") == 0) {
+        p->defsFlag = 1;
+    } else if(strcmp(el, "svg") == 0) {
+        nsvg__parseSVG(p, attr);
+      int flag1 = (p->viewWidth > 0 && p->image->width > 0);
+      int flag2 = (p->viewHeight > 0 && p->image->height > 0);
+      if (p->transform && p->transform->readiness == 0 && flag1 && flag2) {
+            patch__transform__readiness__scaleToViewbox(p);
+            p->transform->readiness = 1;
+        }
+    }
+}
+
+static void patch__context__nsvg__startElement(void* ud, const char* el, const char** attr) {
+    NSVGparser* p = (NSVGparser*)ud;
+
+    if(p->defsFlag) {
+        // Skip everything but gradients in defs
+        if(strcmp(el, "linearGradient") == 0) {
+            nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
+        } else if(strcmp(el, "radialGradient") == 0) {
+            nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
+        } else if(strcmp(el, "stop") == 0) {
+            nsvg__parseGradientStop(p, attr);
+        }
+        return;
+    }
+
+    if(strcmp(el, "g") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseAttribs(p, attr);
+    } else if(strcmp(el, "path") == 0) {
+        if(p->pathFlag)  // Do not allow nested paths.
+            return;
+        nsvg__pushAttr(p);
+        nsvg__parsePath(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "rect") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseRect(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "circle") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseCircle(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "ellipse") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseEllipse(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "line") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parseLine(p, attr);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "polyline") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parsePoly(p, attr, 0);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "polygon") == 0) {
+        nsvg__pushAttr(p);
+        nsvg__parsePoly(p, attr, 1);
+        nsvg__popAttr(p);
+    } else if(strcmp(el, "linearGradient") == 0) {
+        nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
+    } else if(strcmp(el, "radialGradient") == 0) {
+        nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
+    } else if(strcmp(el, "stop") == 0) {
+        nsvg__parseGradientStop(p, attr);
+    } else if(strcmp(el, "defs") == 0) {
+        p->defsFlag = 1;
+    } else if(strcmp(el, "svg") == 0) {
+        nsvg__parseSVG(p, attr);
+    }
+}
+
 static void nsvg__endElement(void* ud, const char* el) {
     NSVGparser* p = (NSVGparser*)ud;
 
@@ -2722,14 +2986,14 @@ static void nsvg__scaleToViewbox(NSVGparser* p, const char* units) {
     }
 }
 
-static void patch__nsvg__scaleToViewbox(NSVGparser* p, const char* units) {
+static void patch__transform__scaleToViewbox(NSVGparser* p) {
     float tx, ty, sx, sy, us, bounds[4], avgs;
 
     // Guess image size if not set completely.
-    bounds[0] = p->context->bounds.xmin;
-    bounds[1] = p->context->bounds.ymin;
-    bounds[2] = p->context->bounds.xmax;
-    bounds[3] = p->context->bounds.ymax;
+    bounds[0] = p->transform->bounds[0];
+    bounds[1] = p->transform->bounds[1];
+    bounds[2] = p->transform->bounds[2];
+    bounds[3] = p->transform->bounds[3];
 
     if(p->viewWidth == 0) {
         if(p->image->width > 0) {
@@ -2755,7 +3019,7 @@ static void patch__nsvg__scaleToViewbox(NSVGparser* p, const char* units) {
     sx = p->viewWidth > 0 ? p->image->width / p->viewWidth : 0;
     sy = p->viewHeight > 0 ? p->image->height / p->viewHeight : 0;
     // Unit scaling
-    us = 1.0f / nsvg__convertToPixels(p, nsvg__coord(1.0f, nsvg__parseUnits(units)), 0.0f, 1.0f);
+    us = 1.0f / nsvg__convertToPixels(p, nsvg__coord(1.0f, p->transform->units), 0.0f, 1.0f);
 
     // Fix aspect ratio
     if(p->alignType == NSVG_ALIGN_MEET) {
@@ -2775,13 +3039,75 @@ static void patch__nsvg__scaleToViewbox(NSVGparser* p, const char* units) {
     sy *= us;
     avgs = (sx + sy) / 2.0f;
 
-    NSVGscaleToViewboxParam* param = &p->context->param;
-    param->tx                      = tx;
-    param->ty                      = ty;
-    param->sx                      = sx;
-    param->sy                      = sy;
-    param->us                      = us;
-    param->avgs                    = avgs;
+    NSVGtransform* transform = p->transform;
+    transform->tx                      = tx;
+    transform->ty                      = ty;
+    transform->sx                      = sx;
+    transform->sy                      = sy;
+    transform->us                      = us;
+    transform->avgs                    = avgs;
+}
+
+static void patch__transform__readiness__scaleToViewbox(NSVGparser* p) {
+    float tx, ty, sx, sy, us, bounds[4], avgs;
+
+    // Guess image size if not set completely.
+    bounds[0] = p->transform->bounds[0];
+    bounds[1] = p->transform->bounds[1];
+    bounds[2] = p->transform->bounds[2];
+    bounds[3] = p->transform->bounds[3];
+
+    if(p->viewWidth == 0) {
+        if(p->image->width > 0) {
+            p->viewWidth = p->image->width;
+        } else {
+            p->viewMinx  = bounds[0];
+            p->viewWidth = bounds[2] - bounds[0];
+        }
+    }
+    if(p->viewHeight == 0) {
+        if(p->image->height > 0) {
+            p->viewHeight = p->image->height;
+        } else {
+            p->viewMiny   = bounds[1];
+            p->viewHeight = bounds[3] - bounds[1];
+        }
+    }
+    if(p->image->width == 0) p->image->width = p->viewWidth;
+    if(p->image->height == 0) p->image->height = p->viewHeight;
+
+    tx = -p->viewMinx;
+    ty = -p->viewMiny;
+    sx = p->viewWidth > 0 ? p->image->width / p->viewWidth : 0;
+    sy = p->viewHeight > 0 ? p->image->height / p->viewHeight : 0;
+    // Unit scaling
+    us = 1.0f / patch__transform__nsvg__convertToPixels(p, nsvg__coord(1.0f, p->transform->units), 0.0f, 1.0f);
+
+    // Fix aspect ratio
+    if(p->alignType == NSVG_ALIGN_MEET) {
+        // fit whole image into viewbox
+        sx = sy = nsvg__minf(sx, sy);
+        tx += nsvg__viewAlign(p->viewWidth * sx, p->image->width, p->alignX) / sx;
+        ty += nsvg__viewAlign(p->viewHeight * sy, p->image->height, p->alignY) / sy;
+    } else if(p->alignType == NSVG_ALIGN_SLICE) {
+        // fill whole viewbox with image
+        sx = sy = nsvg__maxf(sx, sy);
+        tx += nsvg__viewAlign(p->viewWidth * sx, p->image->width, p->alignX) / sx;
+        ty += nsvg__viewAlign(p->viewHeight * sy, p->image->height, p->alignY) / sy;
+    }
+
+    // Transform
+    sx *= us;
+    sy *= us;
+    avgs = (sx + sy) / 2.0f;
+
+    NSVGtransform* transform = p->transform;
+    transform->tx                      = tx;
+    transform->ty                      = ty;
+    transform->sx                      = sx;
+    transform->sy                      = sy;
+    transform->us                      = us;
+    transform->avgs                    = avgs;
 }
 
 void nsvgUpdateBounds(NSVGshape* shape, NSVGbounds* bounds) {
@@ -2793,41 +3119,43 @@ void nsvgUpdateBounds(NSVGshape* shape, NSVGbounds* bounds) {
     }
 }
 
-void nsvgUpdateScaleToViewbox(NSVGshape* shape, NSVGcontext* context) {
+void nsvgUpdateScaleToViewbox(NSVGshape* shape, NSVGtransform* transform) {
     NSVGpath* path;
-    NSVGscaleToViewboxParam the = context->param;
+    float *pt;
+    float t[6];
+    int i;
 
-    shape->bounds[0] = (shape->bounds[0] + the.tx) * the.sx;
-    shape->bounds[1] = (shape->bounds[1] + the.ty) * the.sy;
-    shape->bounds[2] = (shape->bounds[2] + the.tx) * the.sx;
-    shape->bounds[3] = (shape->bounds[3] + the.ty) * the.sy;
+    shape->bounds[0] = (shape->bounds[0] + transform->tx) * transform->sx;
+    shape->bounds[1] = (shape->bounds[1] + transform->ty) * transform->sy;
+    shape->bounds[2] = (shape->bounds[2] + transform->tx) * transform->sx;
+    shape->bounds[3] = (shape->bounds[3] + transform->ty) * transform->sy;
     for(path = shape->paths; path != NULL; path = path->next) {
-        path->bounds[0] = (path->bounds[0] + the.tx) * the.sx;
-        path->bounds[1] = (path->bounds[1] + the.ty) * the.sy;
-        path->bounds[2] = (path->bounds[2] + the.tx) * the.sx;
-        path->bounds[3] = (path->bounds[3] + the.ty) * the.sy;
-        for(the.i = 0; the.i < path->npts; the.i++) {
-            the.pt    = &path->pts[the.i * 2];
-            the.pt[0] = (the.pt[0] + the.tx) * the.sx;
-            the.pt[1] = (the.pt[1] + the.ty) * the.sy;
+        path->bounds[0] = (path->bounds[0] + transform->tx) * transform->sx;
+        path->bounds[1] = (path->bounds[1] + transform->ty) * transform->sy;
+        path->bounds[2] = (path->bounds[2] + transform->tx) * transform->sx;
+        path->bounds[3] = (path->bounds[3] + transform->ty) * transform->sy;
+        for(i = 0; i < path->npts; i++) {
+            pt    = &path->pts[i * 2];
+            pt[0] = (pt[0] + transform->tx) * transform->sx;
+            pt[1] = (pt[1] + transform->ty) * transform->sy;
         }
     }
 
     if(shape->fill.type == NSVG_PAINT_LINEAR_GRADIENT || shape->fill.type == NSVG_PAINT_RADIAL_GRADIENT) {
-        nsvg__scaleGradient(shape->fill.gradient, the.tx, the.ty, the.sx, the.sy);
-        memcpy(the.t, shape->fill.gradient->xform, sizeof(float) * 6);
-        nsvg__xformInverse(shape->fill.gradient->xform, the.t);
+        nsvg__scaleGradient(shape->fill.gradient, transform->tx, transform->ty, transform->sx, transform->sy);
+        memcpy(t, shape->fill.gradient->xform, sizeof(float) * 6);
+        nsvg__xformInverse(shape->fill.gradient->xform, t);
     }
     if(shape->stroke.type == NSVG_PAINT_LINEAR_GRADIENT || shape->stroke.type == NSVG_PAINT_RADIAL_GRADIENT) {
-        nsvg__scaleGradient(shape->stroke.gradient, the.tx, the.ty, the.sx, the.sy);
-        memcpy(the.t, shape->stroke.gradient->xform, sizeof(float) * 6);
-        nsvg__xformInverse(shape->stroke.gradient->xform, the.t);
+        nsvg__scaleGradient(shape->stroke.gradient, transform->tx, transform->ty, transform->sx, transform->sy);
+        memcpy(t, shape->stroke.gradient->xform, sizeof(float) * 6);
+        nsvg__xformInverse(shape->stroke.gradient->xform, t);
     }
 
-    shape->strokeWidth *= the.avgs;
-    shape->strokeDashOffset *= the.avgs;
-    for(the.i = 0; the.i < shape->strokeDashCount; the.i++)
-        shape->strokeDashArray[the.i] *= the.avgs;
+    shape->strokeWidth *= transform->avgs;
+    shape->strokeDashOffset *= transform->avgs;
+    for(i = 0; i < shape->strokeDashCount; i++)
+        shape->strokeDashArray[i] *= transform->avgs;
 }
 
 static void nsvg__createGradients(NSVGparser* p) {
@@ -2885,7 +3213,7 @@ NSVGimage* nsvgParse(char* input, const char* units, float dpi) {
     return ret;
 }
 
-NSVGimage* patch__nsvgParse(char* input, NSVGcontext* ctx) {
+NSVGimage* patch__transform__nsvgParse(NSVGstream *stream, NSVGtransform* transform) {
     NSVGparser* p;
     NSVGimage* ret = 0;
 
@@ -2893,26 +3221,48 @@ NSVGimage* patch__nsvgParse(char* input, NSVGcontext* ctx) {
     if(p == NULL) {
         return NULL;
     }
-    p->dpi     = ctx->dpi;
-    p->context = ctx;
+    p->dpi     = transform->dpi;
+    p->context = NULL;
+    p->transform = transform;
 
-    patch__nsvg__parseXML(input, nsvg__startElement, nsvg__endElement, nsvg__content, p);
+    patch__transform_nsvg__parseXML(stream, patch__transform__nsvg__startElement, nsvg__endElement, nsvg__content, p);
 
     // Create gradients after all definitions have been parsed
     // nsvg__createGradients(p);
 
     // Scale to viewBox
-    patch__nsvg__scaleToViewbox(p, ctx->str_units);
+    if(!transform->readiness){
+         patch__transform__scaleToViewbox(p);
+    }
 
-    ctx->imageWidth  = p->image->width;
-    ctx->imageHeight = p->image->height;
-    ctx->viewMinx    = p->viewMinx;
-    ctx->viewMiny    = p->viewMiny;
-    ctx->viewWidth   = p->viewWidth;
-    ctx->viewHeight  = p->viewHeight;
-    ctx->alignType   = p->alignType;
-    ctx->alignX      = p->alignX;
-    ctx->alignY      = p->alignY;
+    transform->imageWidth  = p->image->width;
+    transform->imageHeight = p->image->height;
+    transform->viewMinx    = p->viewMinx;
+    transform->viewMiny    = p->viewMiny;
+    transform->viewWidth   = p->viewWidth;
+    transform->viewHeight  = p->viewHeight;
+
+    ret      = p->image;
+    p->image = NULL;
+
+    nsvg__deleteParser(p);
+
+    return ret;
+}
+
+NSVGimage* patch__context__nsvgParse(NSVGstream *stream,NSVGcontext *context) {
+    NSVGparser* p;
+    NSVGimage* ret = 0;
+
+    p = nsvg__createParser();
+    if(p == NULL) {
+        return NULL;
+    }
+    p->dpi     = context->transform.dpi;
+    p->context = context;
+    p->transform = NULL;
+
+    patch__context_nsvg__parseXML(stream, patch__context__nsvg__startElement, nsvg__endElement, nsvg__content, p);
 
     ret      = p->image;
     p->image = NULL;
@@ -2991,43 +3341,61 @@ void nsvgDelete(NSVGimage* image) {
     free(image);
 }
 
-int nsvgOpenFileStream(const char* filename, const char* units, float dpi, NSVGcontext* context) {
-    if(!context) {
-        return -1;
-    }
-    FILE* fp = fopen(filename, "rb");
-    if(!fp) {
-        return -2;
-    }
+NSVGstream *nsvgOpenFileStream(const char *filename) {
+  FILE *file = NULL;
+  char *buffer = NULL;
+  NSVGstream *stream = NULL;
 
-    context->buffer = (char*)malloc(NSVG_MAX_BUFFER);
-    if(!context->buffer) {
-        fclose(fp);
-        return -3;
-    }
+  file = fopen(filename, "rb");
+  if (!file) {
+    return NULL;
+  }
 
-    context->fs = fp;
-    strcpy(context->str_units, units);
-    context->dpi = dpi;
+  buffer = (char *)malloc(NSVG_MAX_BUFFER);
+  if (!buffer) {
+    goto error;
+  }
 
-    return 1;
+  stream = (NSVGstream *)malloc(sizeof(NSVGstream));
+  if (!stream) {
+    goto error;
+  }
+
+  memset(stream, 0,sizeof(NSVGstream));
+  stream->fs = file;
+  stream->buffer = buffer;
+  fseek(file, 0, SEEK_END);
+  stream->size = ftell(file);
+  fseek(file, 0, SEEK_SET);
+
+  return stream;
+
+error:
+  if (file) {
+    fclose(file);
+  }
+  if (buffer) {
+    free(buffer);
+  }
+
+  return NULL;
 }
 
-int nsvgParseFromFileStream(NSVGcontext* context) {
-    memset(context->buffer, 0, NSVG_MAX_BUFFER);
-    NSVGimage* image = patch__nsvgParse(context->buffer, context);
-    if(image) {
-        nsvgDelete(image);
-        return 1;
-    }
-    return -1;
-}
-
-int nsvgResetParseFromFileStream(NSVGcontext* context) {
-    FILE* fs = (FILE*)context->fs;
+int nsvgParseFromFileStream(NSVGstream *stream,const char* units, float dpi,NSVGtransform* transform) {
+    FILE* fs = (FILE*)stream->fs;
     fseek(fs, 0, SEEK_SET);
-    memset(context->buffer, 0, NSVG_MAX_BUFFER);
-    NSVGimage* image = patch__nsvgParse(context->buffer, context);
+    memset(stream->buffer, 0, NSVG_MAX_BUFFER);
+
+    memset(transform,0,sizeof(NSVGtransform));
+    transform->bounds[0] = FLT_MAX;
+    transform->bounds[1] = FLT_MAX;
+    transform->bounds[2] = -FLT_MAX;
+    transform->bounds[3] = -FLT_MAX;
+
+    transform->dpi = dpi;
+    transform->units = nsvg__parseUnits(units);
+
+    NSVGimage* image = patch__transform__nsvgParse(stream, transform);
     if(image) {
         nsvgDelete(image);
         return 1;
@@ -3035,15 +3403,28 @@ int nsvgResetParseFromFileStream(NSVGcontext* context) {
     return -1;
 }
 
-void nsvgCloseFileStream(NSVGcontext* context) {
-    if(context) {
-        if(context->fs) {
-            fclose((FILE*)context->fs);
-            context->fs = NULL;
+int nsvgFastParseFromFileStream(NSVGstream *stream,NSVGcontext* context) {
+    FILE* fs = (FILE*)stream->fs;
+    fseek(fs, 0, SEEK_SET);
+    memset(stream->buffer, 0, NSVG_MAX_BUFFER);
+    NSVGimage* image = patch__context__nsvgParse(stream,context);
+    if(image) {
+        nsvgDelete(image);
+        return 1;
+    }
+    return -1;
+}
+
+void nsvgCloseFileStream(NSVGstream* stream){
+    if(stream){
+        if(stream->fs){
+            fclose(stream->fs);
         }
-        if(context->buffer) {
-            free(context->buffer);
-            context->buffer = NULL;
+        if(stream->buffer){
+            free(stream->buffer);
         }
+
+        free(stream);
+        stream = NULL;
     }
 }

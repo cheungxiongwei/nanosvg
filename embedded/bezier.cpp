@@ -135,9 +135,9 @@ PolygonF Bezier::toPolygon(const CubicBezierCurve &curve,
   return flattenedCurve;
 }
 
-void cpp::flattenCubicBezier(const CubicBezierCurve &curve,
-                             EmbeddedPolygonF *polygon,
-                             float bezier_flattening_threshold) {
+void flattenCubicBezier(const CubicBezierCurve &curve,
+                        EmbeddedPolygonF *polygon,
+                        float bezier_flattening_threshold) {
   if (polygon) {
     polygon->count = 0;
     polygon->data[polygon->count++] = curve.start;

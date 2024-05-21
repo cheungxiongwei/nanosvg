@@ -7,122 +7,70 @@ Nano SVG
 Added a usage example of rendering using file streams and piecewise rasterization for embedded rendering with limited memory.
 With limited memory of 3MB RAM, it can parse and render SVG files of any size, such as 10 MB or more.
 
-The following example uses OpenCV to display a rasterized image
+The following example uses OpenCV to display a svg image
+![screenshot of some splines rendered with the sample program](/example/screenshot-3.jpg?raw=true)
 ```cpp
-#include <print>
-#include <vector>
-#include <opencv2/opencv.hpp>
-#include <opencv2/core/utils/logger.hpp>
+ // Load SVG
+ NSVGimage *image;
+ image = nsvgParseFromFile("test.svg", "px", 96);
 
-#include "nanosparser.h"
+ cv::Mat mat = cv::Mat::zeros(cv::Size(640, 480), CV_8UC4);
 
-using namespace std;
-using namespace cv::utils::logging;
+ Transform T;
+ T.sx = mat.size().width / image->width;
+ T.sy = mat.size().height / image->height;
+ T.scale = T.sx < T.sy ? T.sx : T.sy;
+ T.dx = (mat.size().width - image->width * T.scale) / 2.f;
+ T.dy = (mat.size().height - image->height * T.scale) / 2.F;
 
-template<typename T>
-struct bbox_t {
-    T x, y, width, height;
-};
-
-using f_bbox_t = bbox_t<float>;
-
-typedef struct {
-    float width;
-    float height;
-} preview_t;
-
-cv::Mat loadFromFile(const std::string &filename, preview_t preview) {
-    SVGParser parser;
-    parser.open(filename.c_str(), "px", 96);
-    parser.parser(); // [1]
-
-    if(!parser.isValid()) {
-        parser.close();
-        return {};
-    }
-
-    parser.repaser(); // [2]
-
-    auto size = parser.size();
-
-    auto bbox = parser.bounds();
-
-    uint8_t *buffer            = NULL;
-    int clip_width  = 0;
-    int clip_height = 0;
-
-    // Calculate scaling & rendering & crop true content size
-    auto source = preview_t {.width = size.width, .height = size.height};
-    float scale  = SVGParser::CalcRasterizerScale(source.width, source.height, preview.width, preview.height);
-
-    int width  = (int)(size.width * scale);
-    int height = (int)(size.height * scale);
-
-    cv::Mat mat = cv::Mat::zeros(cv::Size(width, height), CV_8UC4);
-
-    float tx {0}, ty {0};
-    if(bbox.x > 0) {
-        tx = -bbox.x * scale;
-    }
-    if(bbox.y > 0) {
-        ty = -bbox.y * scale;
-    }
-
-    parser.render(tx, ty, scale, mat.data, width, height); // [3]
-
-    clip_width  = bbox.width * scale;
-    clip_height = bbox.height * scale;
-
-    if(clip_width > width) {
-        clip_width = width;
-    }
-
-    if(clip_height > height) {
-        clip_height = height;
-    }
-
-    // TODO clip
-
-    parser.close();
-
-    return mat.clone();
+// Use...
+for (NSVGshape *shape = image->shapes; shape != NULL; shape = shape->next) {
+  for (NSVGpath *path = shape->paths; path != NULL; path = path->next) {
+    for (int i = 0; i < path->npts - 1; i += 3) {
+        float *p = &path->pts[i * 2];
+        CubicBezierCurve curve = Bezier::fromPoints({p[0], p[1]}, {p[2], p[3]},
+                                                    {p[4], p[5]}, {p[6], p[7]});
+        PolygonF polygon = Bezier::toPolygon(curve);
+        for (auto i = 1; i < polygon.size(); i++) {
+            // Draw Line
+            // polygon[i-1],polygon[i]
+            auto p1 = polygon[i - 1];
+            auto p2 = polygon[i];
+            cv::line(
+                    mat,
+                    cv::Point{int(p1.x * T.scale + T.dx), int(p1.y * T.scale + T.dy)},
+                    cv::Point{int(p2.x * T.scale + T.dx), int(p2.y * T.scale + T.dy)},
+                    cv::Scalar(0, 255, 0), 1);
+        }
+    } // end CubicBezierCurve
+  }
 }
 
-int main() {
-    setLogLevel(LogLevel::LOG_LEVEL_WARNING);
+// Delete
+nsvgDelete(image);
 
-    // auto svg = R"(example\zoom-out.svg)";
-    auto svg = R"(example\tig.svg)";
+cv::imshow("mat", mat);
+cv::waitKeyEx();
+```
 
-    cv::TickMeter cost;
-    cost.start();
-    auto mat = loadFromFile(svg, {480, 320});
-  
-    cost.stop();
-    std::println("cost:{}",cost.getTimeMilli());
+Set the debug startup environment variable
 
-    if(!mat.empty()) {
-        std::vector<cv::Mat> a;
-        cv::split(mat, a);
-
-        cv::Mat binary = ~a[3];
-        if(!cv::hasNonZero(binary)) {
-            binary = a[2];
-        } 
-       
-        cv::namedWindow("windows");
-        cv::imshow("windows", binary);
-    } else {
-        mat = cv::Mat::zeros({480, 320}, CV_8UC3);
-        cv::namedWindow("windows");
-        cv::imshow("windows", mat);
+launch.vs.json
+```
+{
+  "version": "0.2.1",
+  "defaults": {},
+  "configurations": [
+    {
+      "type": "default",
+      "project": "CMakeLists.txt",
+      "projectTarget": "nanoembedded.exe",
+      "name": "nanoembedded.exe",
+      "env": {
+        "PATH": "PATH=${env.PATH};C:\\Hub\\Source\\opencv\\build\\x64\\vc16\\bin;"
+      }
     }
-
-    while(true) {
-        if(cv::waitKey(10) == 'q') break;
-    }
-
-    return 0;
+  ]
 }
 ```
 
